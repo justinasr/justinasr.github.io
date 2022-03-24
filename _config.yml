@@ -3,6 +3,8 @@ safe: true
 source: .
 incremental: false
 highlighter: rouge
+name: ""
+title: null
 gist:
   noscript: false
 kramdown:
