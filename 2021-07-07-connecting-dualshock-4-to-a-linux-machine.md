@@ -182,6 +182,164 @@ Run:
 ```
 Of course, this code does not check for errors and works only in ideal conditions. In the real world, any of these functions could return an error that should be gracefully handled.
 
+Once we know how to scan for devices around us, let’s try to connect to one. As name of this post suggests it is going to be a DualShock 4 game controller.
+
+## Preparing to connect
+
+First of all, device address string has to be converted to a bdaddr_t. I will omit scanning part and hardcode my controller’s address just to save some time while debugging. This time I will also include return value checking to catch any mishaps.
+
+```c
+// Hardcoded device address
+char dest[18] = "01:23:45:67:89:AB";
+bdaddr_t address;
+// Convert char array to bdaddr_t
+if (str2ba(dest, &address) != 0) {
+    printf("Could not convert device address %s\n", dest);
+}
+```
+Now we have to create a struct that will have all the connection details. Struct type is sockaddr_l2 and it looks like this:
+
+```c
+// L2CAP socket address
+struct sockaddr_l2 {
+    sa_family_t    l2_family;
+    unsigned short l2_psm;
+    bdaddr_t       l2_bdaddr;
+    unsigned short l2_cid;
+    uint8_t        l2_bdaddr_type;
+};
+```
+We will have to set three attributes – l2_bdaddr, l2_family and l2_psm. l2_bdaddr will be the device address that we just converted from a string. l2_family is the address family which will, in this case, be a constant AF_BLUETOOTH, that has a value of 31. Other well know address family types are AF_INET and AF_INET6 (values 2 and 10, IPv4 and IPv6 respectively). The last thing, l2_psm will be set to 0x13. This means that this is a HID (Human interface device) and that we will “listen on interrupt channel”, basically whenever something will change on the remote controller’s end, it’ll send us a message with updated information, such as button press. Magic value 0x13 comes from this specification.
+
+```c
+struct sockaddr_l2 interruptSocketAddress = { 0 };
+interruptSocketAddress.l2_bdaddr = address;
+interruptSocketAddress.l2_family = AF_BLUETOOTH;
+interruptSocketAddress.l2_psm = htobs(0x13);
+```
+Function htobs just converts 0x13 value to have a correct endianness.
+
+## Connect!
+
+Finally we arrive at the pinnacle of this post – connecting to the DS4 controller.
+
+We just need to create a socket:
+
+```c
+int interruptSocket;
+interruptSocket = socket(AF_BLUETOOTH, SOCK_SEQPACKET, BTPROTO_L2CAP);
+```
+AF_BLUETOOTH is the address family, SOCK_SEQPACKET is socket type and BTPROTO_L2CAP is telling to use L2CAP protocol stack. I have not fully figured out what SOCK_SEQPACKET and L2CAP exactly are, but I found this for the former:
+
+> SOCK_SEQPACKET - Provides a sequenced, reliable, two-way connection- based data transmission path for datagrams of fixed maximum length; a consumer is required to read an entire packet with each input system call.BTPROTO_L2CAP
+Then we connect to the socket using socket address struct:
+
+```c
+int interruptSocketStatus;
+interruptSocketStatus = connect(interruptSocket,
+                                (struct sockaddr *)&interruptSocketAddress,
+                                sizeof(interruptSocketAddress));
+if (interruptSocketStatus == 0) {
+    printf("Connected interrupt socket\n");
+} else {
+    perror("Something went wrong");
+}
+```
+Basically it takes a socket and connects it using the given address struct. Now interrupt socket can be used to send and receive data. However, since this is interrupt socket, we’ll only read data from it. Writing is useless as no one is listening to this socket on the other side.
+
+## Reading DS4 messages
+
+Reading a socket is pretty easy. We know that DS4 sends 78 bytes through the interrupt socket:
+
+```c
+unsigned char resp[78];
+while (1) {
+    recv(interruptSocket, resp, sizeof(resp), 0);
+}
+```
+This will continuously read interrupt socket and put read data into resp array. If we write little helper function to print char array as hexadecimal values, we can see the full message in hex:
+
+```c
+void printHex(char* chars, int length) {
+    for (int i = 0; i < length; i++) {
+        printf("%02hhX ", chars[i]);
+    }
+    printf("\n");
+}
+```
+Pass the resp array to printHex function:
+
+```c
+while (1) {
+    recv(interruptSocket, resp, sizeof(resp), 0);
+    printHex(resp, sizeof(resp));
+}
+```
+Now you should see a lot of hex values being printed on a screen. Some of them are fluctuating, some change only when a button is pressed. Next step will be understanding these values and printing DS4 actions in human readable form like “Pressed triangle”.
+
+Full source code:
+```c
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <bluetooth/bluetooth.h>
+#include <bluetooth/l2cap.h>
+ 
+void printHex(char* chars, int length) {
+    for (int i = 0; i < length; i++) {
+        printf("%02hhX ", chars[i]);
+    }
+    printf("\n");
+}
+ 
+int main(int argc, char **argv) {
+    // Hardcoded device address
+    char dest[18] = "DC:0C:2D:B8:2B:9A";
+    bdaddr_t address;
+    // Convert char array to bdaddr_t
+    if (str2ba(dest, &address) != 0) {
+        printf("Could not convert device address %s\n", dest);
+    }
+    struct sockaddr_l2 interruptSocketAddress = { 0 };
+    interruptSocketAddress.l2_bdaddr = address;
+    interruptSocketAddress.l2_family = AF_BLUETOOTH;
+    interruptSocketAddress.l2_psm = htobs(0x13);
+ 
+    // Create a socket for and for interrupts
+    int interruptSocket;
+    interruptSocket = socket(AF_BLUETOOTH, SOCK_SEQPACKET, BTPROTO_L2CAP);
+ 
+    // Connect these sockets to the device
+    int interruptSocketStatus;
+    interruptSocketStatus = connect(interruptSocket,
+                                    (struct sockaddr *)&interruptSocketAddress,
+                                    sizeof(interruptSocketAddress));
+    if (interruptSocketStatus == 0) {
+        printf("Connected interrupt socket\n");
+    } else {
+        perror("Something went wrong");
+    }
+ 
+    unsigned char resp[79];
+    while (1) {
+        recv(interruptSocket, resp, sizeof(resp), 0);
+        printHex(resp, sizeof(resp));
+    }
+}
+```
+Compile with gcc:
+
+```bash
+gcc -o blue blue.c -lbluetooth
+```
+
+Run:
+
+```bash
+./blue
+```
+
 References:
 
 https://github.com/torvalds/linux/blob/master/include/net/bluetooth/bluetooth.h
@@ -189,3 +347,7 @@ https://git.kernel.org/pub/scm/bluetooth/bluez.git/tree/lib/bluetooth.c
 https://github.com/torvalds/linux/blob/master/include/net/bluetooth/hci.h
 https://people.csail.mit.edu/albert/bluez-intro/c404.html
 https://macaddresschanger.com/what-is-bluetooth-address-BD_ADDR
+
+https://man7.org/linux/man-pages/man2/connect.2.html
+https://man7.org/linux/man-pages/man2/socket.2.html
+https://www.bluetooth.com/specifications/assigned-numbers/logical-link-control/
