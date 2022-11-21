@@ -340,14 +340,602 @@ Run:
 ./blue
 ```
 
+Part 2 ended with a lot of lines of hexadecimal values, for example:
+
+```
+A1 01 7A 7F 7F 7F 08 00 00 00 00 27 5B 7F 00 ... 00 00 F5 5A AA 27 5B 7F 00
+A1 01 7A 80 81 7F 08 00 00 00 00 27 5B 7F 00 ... 00 00 F5 5A AA 27 5B 7F 00
+A1 01 7B 80 7F 7F 08 00 00 00 00 27 5B 7F 00 ... 00 00 F5 5A AA 27 5B 7F 00
+A1 01 7A 80 7F 7F 08 00 00 00 00 27 5B 7F 00 ... 00 00 F5 5A AA 27 5B 7F 00
+```
+Some of these values will change when button on a controller is pressed. So, it’s done, no? Almost, current values are not exactly DS4 values, but rather a DS4 that is connected as a generic controller. For example, DS4 touchpad and gyroscope values are not shown in these hexadecimal lines.
+
+## Asking DS4 to change mode
+
+First of all, we need a second socket in addition to interrupt socket – a control socket. It is created the same way as interrupt socket, just magic l2_psm value is 0x11 instead of 0x13.
+
+```c
+#define PSM_HID_CONTROL 0x11
+#define PSM_HID_INTERRUPT 0x13
+...
+// Interrupt socket
+struct sockaddr_l2 interruptSocketAddress = { 0 };
+interruptSocketAddress.l2_bdaddr = address;
+interruptSocketAddress.l2_family = AF_BLUETOOTH;
+interruptSocketAddress.l2_psm = htobs(PSM_HID_INTERRUPT);
+int interruptSocket;
+interruptSocket = socket(AF_BLUETOOTH, SOCK_SEQPACKET, BTPROTO_L2CAP);
+ 
+// Control socket
+struct sockaddr_l2 controlSocketAddress = { 0 };
+controlSocketAddress.l2_bdaddr = address;
+controlSocketAddress.l2_family = AF_BLUETOOTH;
+controlSocketAddress.l2_psm = htobs(PSM_HID_CONTROL);
+int controlSocket;
+controlSocket = socket(AF_BLUETOOTH, SOCK_SEQPACKET, BTPROTO_L2CAP);
+ 
+// Connect these sockets to the device
+if (connect(interruptSocket, (struct sockaddr *)&interruptSocketAddress, sizeof(interruptSocketAddress)) == 0) {
+    printf("Connected interrupt socket\n");
+} else {
+    perror("Something went wrong");
+}
+ 
+if (connect(controlSocket, (struct sockaddr *)&controlSocketAddress, sizeof(controlSocketAddress)) == 0) {
+    printf("Connected control socket\n");
+} else {
+    perror("Something went wrong");
+}
+```
+Now there are two sockets – interrupt where DS4 sends it’s state and control where we can change what data DS4 sends. Only thing to do now is to send a specially crafted feature request through control socket:
+
+```c
+#define GET_REPORT 0x40
+#define FEATURE 0x03
+...
+char comm[] = { GET_REPORT | FEATURE, 0x02 };
+send(controlSocket, comm, sizeof(comm), 0);
+```
+
+## Reading DS4 messages… again
+
+Now, we can try listening to interrupt socket again. You will notice that newly received messages now include both finger coordinates on touchpad and gyroscope/accelerometer data. Only thing left to do is to decode these hexadecimal values to something that makes sense. Thankfully people in PS4 Dev Wiki already did this. I will just post my code that prints which buttons are pressed as well as finger coordinates.
+
+```c
+recv(interruptSocket, resp, sizeof(resp), 0);
+float leftAnalogX = ((resp[4] - 127.5) / 127.5) * 100;
+float leftAnalogY = ((resp[5] - 127.5) / 127.5) * -100;
+float rightAnalogX = ((resp[6] - 127.5) / 127.5) * 100;
+float rightAnalogY = ((resp[7] - 127.5) / 127.5) * -100;
+printf("%+6.1f%% %+6.1f%% %+6.1f%% %+6.1f%% ", leftAnalogX, leftAnalogY, rightAnalogX, rightAnalogY);
+ 
+if (resp[9] & (0b01000000)) {
+    printf("L3 ");
+} else {
+    printf("   ");
+}
+ 
+if (resp[9] & (0b10000000)) {
+    printf("R3 ");
+} else {
+    printf("   ");
+}
+ 
+if (resp[9] & (0b00100000)) {
+    printf("OPTION ");
+} else {
+    printf("       ");
+}
+ 
+if (resp[9] & (0b00010000)) {
+    printf("SHARE ");
+} else {
+    printf("      ");
+}
+ 
+if (resp[9] & (0b00000001)) {
+    printf("L1 ");
+} else {
+    printf("   ");
+}
+ 
+if (resp[9] & (0b00000010)) {
+    printf("R1 ");
+} else {
+    printf("   ");
+}
+ 
+if (resp[11]) {
+    float x = (resp[11] / 255.0) * 100;
+    printf("L1 %6.2f%% ", x);
+} else {
+    printf("           ");
+}
+ 
+if (resp[12]) {
+    float x = (resp[12] / 255.0) * 100;
+    printf("L2 %6.2f%% ", x);
+} else {
+    printf("           ");
+}
+ 
+if (resp[8] & (0b10000000)) {
+    printf("TRIANGLE ");
+} else {
+    printf("         ");
+}
+if (resp[8] & (0b01000000)) {
+    printf("CIRCLE ");
+} else {
+    printf("       ");
+}
+if (resp[8] & (0b00010000)) {
+    printf("SQUARE ");
+} else {
+    printf("       ");
+}
+if (resp[8] & (0b00100000)) {
+    printf("CROSS ");
+} else {
+    printf("      ");
+}
+ 
+if ((resp[8] & 0b00001111) == 0b00000000) {
+    printf("N ");
+} else {
+    printf("  ");
+}
+if ((resp[8] & 0b00001111) == 0b00000001) {
+    printf("NE ");
+} else {
+    printf("   ");
+}
+if ((resp[8] & 0b00001111) == 0b00000010) {
+    printf("E ");
+} else {
+    printf("  ");
+}
+if ((resp[8] & 0b00001111) == 0b00000011) {
+    printf("SE ");
+} else {
+    printf("   ");
+}
+if ((resp[8] & 0b00001111) == 0b00000100) {
+    printf("S ");
+} else {
+    printf("  ");
+}
+if ((resp[8] & 0b00001111) == 0b00000101) {
+    printf("SW ");
+} else {
+    printf("   ");
+}
+if ((resp[8] & 0b00001111) == 0b00000110) {
+    printf("W ");
+} else {
+    printf("  ");
+}
+if ((resp[8] & 0b00001111) == 0b00000111) {
+    printf("NW ");
+} else {
+    printf("   ");
+}
+ 
+if (resp[10] & (0b00000001)) {
+    printf("PS ");
+} else {
+    printf("   ");
+}
+ 
+if (resp[10] & (0b00000010)) {
+    printf("CLICK ");
+} else {
+    printf("      ");
+}
+ 
+if (!(resp[38] & (0b10000000))) {
+    int a = resp[39];
+    int b = resp[40];
+    int c = resp[41];
+    int x = ((b & 0b1111) << 8) | a;
+    int y = (c << 4) | (b & 0b1111);
+    printf("FINGER 1 x=%4d y=%4d ", x, y);
+} else {
+    printf("                       ");
+}
+ 
+if (!(resp[42] & (0b10000000))) {
+    int a = resp[43];
+    int b = resp[44];
+    int c = resp[45];
+    int x = ((b & 0b1111) << 8) | a;
+    int y = (c << 4) | (b & 0b1111);
+    printf("FINGER 2 x=%4d y=%4d ", x, y);
+} else {
+    printf("                       ");
+}
+ 
+float battery = (resp[33] / 15.0) * 100;
+ 
+printf("BATT %.2f%% %X\n", battery, resp[33]);
+```
+
+## Rumble and LED colors
+
+One last thing to do is to control the vibration and RGB led in the controller. This is done through interrupt socket (yes, not control socket!). However, each message has to end with a CRC-32 – basically, last 4 bytes are a checksum of the whole message. Luckily I found a complete CRC-32 implementation that worked with DS4 controller. All rights go to original authors.
+
+```c
+void make_crc_32_table(uint32_t *table) {
+    uint32_t i;
+    uint32_t j;
+    uint32_t crc;
+ 
+    printf("Generating CRC-32 table:\n");
+    for (i = 0; i < 256; i++) {
+        crc = i;
+        for (j = 0; j < 8; j++) {
+            if (crc & 0x00000001L) {
+                crc = (crc >> 1) ^ CRC_POLY_32;
+            } else {
+                crc = crc >> 1;
+            }
+        }
+        table[i] = crc;
+        printf("%3d. %08lX\n", i, crc);
+    }
+}
+
+uint32_t crc_32(const unsigned char *input_str, size_t num_bytes, uint32_t *table) {
+    uint32_t crc = CRC_START_32;
+    const unsigned char *ptr = input_str;
+ 
+    for (size_t i = 0; i < num_bytes; i++) {
+        crc = (crc >> 8) ^ table[(crc ^ *ptr++) & 0xFF];
+    }
+ 
+    return (crc ^ 0xFFFFFFFFul);
+}
+```
+First it precalculates a table that is then used in a for loop together with XOR. I never got into details how exactly it works, but it works. Note that you have to call make_crc_32_table once before sending messages to DS4. DS4 has two different vibration motors – a big and a small one that give different vibrations when on.
+
+```c
+char led[] = {0xa2,    0x11, 0xc0, 0x20, 0xff, 0x04, 0x00, rumble1,
+              rumble2, r,    g,    b,    0x00, 0x00, 0x00, 0x00,
+              0x00,    0x00, 0x00, 0x00, 0x00, 0x00, 0x43, 0x43,
+              0x00,    0x4d, 0x85, 0x00, 0x00, 0x00, 0x00, 0x00,
+              0x00,    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+              0x00,    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+              0x00,    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+              0x00,    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+              0x00,    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+              0x00,    0x00, 0x00, 0xd8, 0x8e, 0x94, 0xdd};
+ 
+uint32_t crc = crc_32(led, sizeof(led) - 4, table);
+led[sizeof(led) - 4] = (char)(crc & 0xFF);
+led[sizeof(led) - 3] = (char)((crc & 0xFF00) >> 8);
+led[sizeof(led) - 2] = (char)((crc & 0xFF0000) >> 16);
+led[sizeof(led) - 1] = (char)((crc & 0xFF000000) >> 24);
+send(interruptSocket, led, sizeof(led), 0);
+```
+Rumble and RGB values are one byte – 0-255 values.
+
+Full source code:
+
+```c
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <bluetooth/bluetooth.h>
+#include <bluetooth/l2cap.h>
+#include <stdint.h>
+ 
+#define CRC_POLY_32 0xEDB88320ul
+#define CRC_START_32 0xFFFFFFFFul
+ 
+// https://www.bluetooth.com/specifications/assigned-numbers/logical-link-control/
+// Protocol and Service Multiplexers (PSMs)
+#define PSM_HID_CONTROL 0x11
+#define PSM_HID_INTERRUPT 0x13
+ 
+#define GET_REPORT 0x40
+#define FEATURE 0x03
+ 
+void make_crc_32_table(uint32_t *table) {
+    uint32_t i;
+    uint32_t j;
+    uint32_t crc;
+ 
+    printf("Generating CRC-32 table:\n");
+    for (i = 0; i < 256; i++) {
+        crc = i;
+        for (j = 0; j < 8; j++) {
+            if (crc & 0x00000001L) {
+                crc = (crc >> 1) ^ CRC_POLY_32;
+            } else {
+                crc = crc >> 1;
+            }
+        }
+        table[i] = crc;
+        printf("%3d. %08lX\n", i, crc);
+    }
+}
+
+uint32_t crc_32(const unsigned char *input_str, size_t num_bytes, uint32_t *table) {
+    uint32_t crc = CRC_START_32;
+    const unsigned char *ptr = input_str;
+ 
+    for (size_t i = 0; i < num_bytes; i++) {
+        crc = (crc >> 8) ^ table[(crc ^ *ptr++) & 0xFF];
+    }
+ 
+    return (crc ^ 0xFFFFFFFFul);
+}
+ 
+int main(int argc, char **argv) {
+    // Hardcoded device address
+    char dest[18] = "DC:0C:2D:B8:2B:9A";
+    bdaddr_t address;
+    // Convert char array to bdaddr_t
+    if (str2ba(dest, &address) != 0) {
+        printf("Could not convert device address %s\n", dest);
+    }
+    // Interrupt socket
+    struct sockaddr_l2 interruptSocketAddress = { 0 };
+    interruptSocketAddress.l2_bdaddr = address;
+    interruptSocketAddress.l2_family = AF_BLUETOOTH;
+    interruptSocketAddress.l2_psm = htobs(PSM_HID_INTERRUPT);
+    int interruptSocket;
+    interruptSocket = socket(AF_BLUETOOTH, SOCK_SEQPACKET, BTPROTO_L2CAP);
+  
+    // Control socket
+    struct sockaddr_l2 controlSocketAddress = { 0 };
+    controlSocketAddress.l2_bdaddr = address;
+    controlSocketAddress.l2_family = AF_BLUETOOTH;
+    controlSocketAddress.l2_psm = htobs(PSM_HID_CONTROL);
+    int controlSocket;
+    controlSocket = socket(AF_BLUETOOTH, SOCK_SEQPACKET, BTPROTO_L2CAP);
+ 
+    // Connect these sockets to the device
+    if (connect(interruptSocket, (struct sockaddr *)&interruptSocketAddress, sizeof(interruptSocketAddress)) == 0) {
+        printf("Connected interrupt socket\n");
+    } else {
+        perror("Something went wrong");
+    }
+ 
+    if (connect(controlSocket, (struct sockaddr *)&controlSocketAddress, sizeof(controlSocketAddress)) == 0) {
+        printf("Connected control socket\n");
+    } else {
+        perror("Something went wrong");
+    }
+  
+    uint32_t table[256];
+    make_crc_32_table(table);
+    char comm[] = { GET_REPORT | FEATURE, 0x02 };
+    send(controlSocket, comm, sizeof(comm), 0);
+    char r = 0;
+    char g = 0;
+    char b = 0;
+    char rumble1 = 0;
+    char rumble2 = 0;
+    unsigned char resp[79];
+    while (1) {
+        recv(interruptSocket, resp, sizeof(resp), 0);
+        float leftAnalogX = ((resp[4] - 127.5) / 127.5) * 100;
+        float leftAnalogY = ((resp[5] - 127.5) / 127.5) * -100;
+        float rightAnalogX = ((resp[6] - 127.5) / 127.5) * 100;
+        float rightAnalogY = ((resp[7] - 127.5) / 127.5) * -100;
+        printf("%+6.1f%% %+6.1f%% %+6.1f%% %+6.1f%% ", leftAnalogX, leftAnalogY, rightAnalogX, rightAnalogY);
+         
+        if (resp[9] & (0b01000000)) {
+            printf("L3 ");
+        } else {
+            printf("   ");
+        }
+ 
+        if (resp[9] & (0b10000000)) {
+            printf("R3 ");
+        } else {
+            printf("   ");
+        }
+ 
+        if (resp[9] & (0b00100000)) {
+            printf("OPTION ");
+        } else {
+            printf("       ");
+        }
+ 
+        if (resp[9] & (0b00010000)) {
+            printf("SHARE ");
+        } else {
+            printf("      ");
+        }
+ 
+        if (resp[9] & (0b00000001)) {
+            printf("L1 ");
+        } else {
+            printf("   ");
+        }
+ 
+        if (resp[9] & (0b00000010)) {
+            printf("R1 ");
+        } else {
+            printf("   ");
+        }
+ 
+        if (resp[11]) {
+            float x = (resp[11] / 255.0) * 100;
+            rumble2 = resp[11];
+            printf("L1 %6.2f%% ", x);
+        } else {
+            printf("           ");
+            rumble2 = 0;
+        }
+ 
+        if (resp[12]) {
+            float x = (resp[12] / 255.0) * 100;
+            rumble1 = resp[12];
+            printf("L2 %6.2f%% ", x);
+        } else {
+            printf("           ");
+            rumble1 = 0;
+        }
+ 
+        if (resp[8] & (0b10000000)) {
+            printf("TRIANGLE ");
+            g = 255;
+        } else {
+            printf("         ");
+            g = 0;
+        }
+        if (resp[8] & (0b01000000)) {
+            printf("CIRCLE ");
+            b = 255;
+        } else {
+            printf("       ");
+            b = 0;
+        }
+        if (resp[8] & (0b00010000)) {
+            printf("SQUARE ");
+            r = 255;
+        } else {
+            printf("       ");
+            r = 0;
+        }
+        if (resp[8] & (0b00100000)) {
+            printf("CROSS ");
+            r = 255;
+            g = 255;
+            b = 255;
+        } else {
+            printf("      ");
+        }
+ 
+        if ((resp[8] & 0b00001111) == 0b00000000) {
+            printf("N ");
+        } else {
+            printf("  ");
+        }
+        if ((resp[8] & 0b00001111) == 0b00000001) {
+            printf("NE ");
+        } else {
+            printf("   ");
+        }
+        if ((resp[8] & 0b00001111) == 0b00000010) {
+            printf("E ");
+        } else {
+            printf("  ");
+        }
+        if ((resp[8] & 0b00001111) == 0b00000011) {
+            printf("SE ");
+        } else {
+            printf("   ");
+        }
+        if ((resp[8] & 0b00001111) == 0b00000100) {
+            printf("S ");
+        } else {
+            printf("  ");
+        }
+        if ((resp[8] & 0b00001111) == 0b00000101) {
+            printf("SW ");
+        } else {
+            printf("   ");
+        }
+        if ((resp[8] & 0b00001111) == 0b00000110) {
+            printf("W ");
+        } else {
+            printf("  ");
+        }
+        if ((resp[8] & 0b00001111) == 0b00000111) {
+            printf("NW ");
+        } else {
+            printf("   ");
+        }
+ 
+        if (resp[10] & (0b00000001)) {
+            printf("PS ");
+        } else {
+            printf("   ");
+        }
+ 
+        if (resp[10] & (0b00000010)) {
+            printf("CLICK ");
+        } else {
+            printf("      ");
+        }
+ 
+        if (!(resp[38] & (0b10000000))) {
+            int a = resp[39];
+            int b = resp[40];
+            int c = resp[41];
+            int x = ((b & 0b1111) << 8) | a;
+            int y = (c << 4) | (b & 0b1111);
+            printf("FINGER 1 x=%4d y=%4d ", x, y);
+        } else {
+            printf("                       ");
+        }
+ 
+        if (!(resp[42] & (0b10000000))) {
+            int a = resp[43];
+            int b = resp[44];
+            int c = resp[45];
+            int x = ((b & 0b1111) << 8) | a;
+            int y = (c << 4) | (b & 0b1111);
+            printf("FINGER 2 x=%4d y=%4d ", x, y);
+        } else {
+            printf("                       ");
+        }
+ 
+        float battery = (resp[33] / 15.0) * 100;
+ 
+        printf("BATT %.2f%% %X\n", battery, resp[33]);
+ 
+        char led[] = {0xa2,    0x11, 0xc0, 0x20, 0xff, 0x04, 0x00, rumble1,
+                      rumble2, r,    g,    b,    0x00, 0x00, 0x00, 0x00,
+                      0x00,    0x00, 0x00, 0x00, 0x00, 0x00, 0x43, 0x43,
+                      0x00,    0x4d, 0x85, 0x00, 0x00, 0x00, 0x00, 0x00,
+                      0x00,    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                      0x00,    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                      0x00,    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                      0x00,    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                      0x00,    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                      0x00,    0x00, 0x00, 0xd8, 0x8e, 0x94, 0xdd};
+ 
+        uint32_t crc = crc_32(led, sizeof(led) - 4, table);
+        led[sizeof(led) - 4] = (char)(crc & 0xFF);
+        led[sizeof(led) - 3] = (char)((crc & 0xFF00) >> 8);
+        led[sizeof(led) - 2] = (char)((crc & 0xFF0000) >> 16);
+        led[sizeof(led) - 1] = (char)((crc & 0xFF000000) >> 24);
+        send(interruptSocket, led, sizeof(led), 0);
+    }
+ 
+    close(controlSocket);
+    close(interruptSocket);
+}
+```
+
+Compile with gcc:
+
+```bash
+gcc -o blue blue.c -lbluetooth
+```
+Run:
+
+```bash
+./blue
+```
+
 References:
 
-https://github.com/torvalds/linux/blob/master/include/net/bluetooth/bluetooth.h
-https://git.kernel.org/pub/scm/bluetooth/bluez.git/tree/lib/bluetooth.c
-https://github.com/torvalds/linux/blob/master/include/net/bluetooth/hci.h
-https://people.csail.mit.edu/albert/bluez-intro/c404.html
-https://macaddresschanger.com/what-is-bluetooth-address-BD_ADDR
+- https://github.com/torvalds/linux/blob/master/include/net/bluetooth/bluetooth.h
+- https://git.kernel.org/pub/scm/bluetooth/bluez.git/tree/lib/bluetooth.c
+- https://github.com/torvalds/linux/blob/master/include/net/bluetooth/hci.h
+- https://people.csail.mit.edu/albert/bluez-intro/c404.html
+- https://macaddresschanger.com/what-is-bluetooth-address-BD_ADDR
 
-https://man7.org/linux/man-pages/man2/connect.2.html
-https://man7.org/linux/man-pages/man2/socket.2.html
-https://www.bluetooth.com/specifications/assigned-numbers/logical-link-control/
+- https://man7.org/linux/man-pages/man2/connect.2.html
+- https://man7.org/linux/man-pages/man2/socket.2.html
+- https://www.bluetooth.com/specifications/assigned-numbers/logical-link-control/
+
+- https://www.psdevwiki.com/ps4/DS4-BT
+- https://www.lammertbies.nl/comm/info/crc-calculation
